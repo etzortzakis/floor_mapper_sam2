@@ -150,7 +150,7 @@ def annotate_grid_on_image(image, floor_mask, grid_size=5, coverage_threshold=0.
 
 def main(state: dict) -> dict:
     """
-    Floor mapping pipeline using SAM2 segmentation.
+    Floor mapping pipeline using SAM2 segmentation and image generation via Flux Schnell.
     """
     prompt = state.get("prompt")
     api_key = state.get("replicate_api_key")
@@ -161,8 +161,21 @@ def main(state: dict) -> dict:
     try:
         os.environ["REPLICATE_API_TOKEN"] = api_key
 
-        # --- Step 1: Generate or load image ---
-        image_path = state.get("image_path", "generated_map.jpg")
+        # --- Step 1: Generate image with Flux Schnell ---
+        print("→ Generating image with Flux Schnell")
+        import replicate  # in case not globally imported
+        result = replicate.run(
+            "black-forest-labs/flux-schnell",
+            input={
+                "prompt": prompt,
+                "megapixels": "0.25",
+                "output_format": "jpg"
+            }
+        )
+        image_url = result[0].url
+        image_path = "generated_map.jpg"
+        with open(image_path, "wb") as f:
+            f.write(requests.get(image_url).content)
         image = np.array(Image.open(image_path).convert("RGB"))
         if image.shape[-1] == 3:
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -192,6 +205,7 @@ def main(state: dict) -> dict:
 
         # --- Step 7: Update state ---
         state.update({
+            "image_path": image_path,
             "floor_mask_image": "sam2_floor_mask_overlay.png",
             "grid_json": "sam2_grid.json",
             "annotated_image": "sam2_annotated_grid.png",
