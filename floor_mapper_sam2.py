@@ -151,7 +151,7 @@ def annotate_grid_on_image(image, floor_mask, grid_size=5, coverage_threshold=0.
 
 def main(state: dict) -> dict:
     """
-    Floor mapping pipeline using SAM2 segmentation and grid mapping, matching the updated SSA structure.
+    Floor mapping pipeline using only SAM2 segmentation and grid mapping.
     Input:
         - state["prompt"]: str, required
         - state["replicate_api_key"]: str, required
@@ -162,6 +162,8 @@ def main(state: dict) -> dict:
             - "grid_size": number of tiles per side (int)
             - "map": 2D list of 1s (walkable) and 0s (non-walkable)
     """
+    import base64
+
     prompt = state.get("prompt")
     api_key = state.get("replicate_api_key")
     scene_size_m = state.get("scene_size_m")
@@ -172,7 +174,7 @@ def main(state: dict) -> dict:
     try:
         os.environ["REPLICATE_API_TOKEN"] = api_key
 
-        # === Step 1: Generate image ===
+        # Step 1: Generate image
         print("→ Generating image with Flux Schnell")
         import replicate
         result = replicate.run(
@@ -189,43 +191,34 @@ def main(state: dict) -> dict:
             f.write(requests.get(image_url).content)
         image = np.array(Image.open(image_path))
 
-        # === Step 2: Segment using SAM2 ===
+        # Step 2: Segment using SAM2
         print("→ Segmenting image using SAM2")
         sam2_output = run_sam2_segmentation(image_path, api_key)
         masks = download_all_masks(sam2_output)
 
-        # === Step 3: Convert masks to DataFrame ===
-        # Ensure all masks have the same size as the image
-        mask_size = list(image.shape[:2])
-        df = []
-        for mask in masks:
-            area = int(np.count_nonzero(mask))
-            size = list(mask.shape)
-            df.append({
-                "area": area,
-                "mask": mask,
-                "segmentation": {"size": size}
-            })
-        df = pd.DataFrame(df)
-
-        # === Step 4: Floor + Grid Processing ===
-        # Calculate grid size as before
-        grid_size = math.ceil(scene_size_m / 1.5)
-        output_prefix = "output_map"
-        floor_mask, grid_data, files = process_main_pipeline(
-            df, image, output_prefix=output_prefix,
-            grid_size=grid_size, min_pixels=20000, center_tolerance=0.25
-        )
-
+        # Step 3: Select best mask (largest not touching border)
+        floor_mask = analyze_and_select_floor_mask(masks)
         if floor_mask is None:
             return {"error": "Failed to detect floor mask"}
 
-        # === Step 5: Output Processing ===
-        with open(files["annotated_image"], "rb") as f:
+        # Step 4: Overlay mask for visualization
+        overlay_path = "sam2_floor_mask_overlay.png"
+        overlay_mask_on_image(image, floor_mask, save_path=overlay_path)
+
+        # Step 5: Grid generation
+        grid_size = math.ceil(scene_size_m / 1.5)
+        grid_data = generate_grid_data(floor_mask, grid_size=grid_size)
+
+        # Step 6: Annotate grid on image
+        annotated_path = "sam2_annotated_grid.png"
+        annotate_grid_on_image(image, floor_mask, grid_size=grid_size, save_path=annotated_path)
+
+        # Step 7: Output base64 and map
+        with open(annotated_path, "rb") as f:
             image_bytes = f.read()
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        size = grid_data["grid_size"]
-        tile_map = [[0] * size for _ in range(size)]
+
+        tile_map = [[0] * grid_size for _ in range(grid_size)]
         for tile in grid_data["tiles"]:
             row, col = tile["row"], tile["col"]
             tile_map[row][col] = 1 if tile["walkable"] else 0
